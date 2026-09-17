@@ -5538,5 +5538,217 @@ async def dashboard_page(request: Request):
 async def panel_page(request: Request):
     return HTMLResponse(content=PANEL_HTML)
 
+# ═══════════════════════════════════════════════════════════════════════
+# 🌐 NODE API — مدیریت نودها (روی مستر)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/nodes")
+async def api_list_nodes(_=Depends(require_auth)):
+    """لیست همه‌ی ۵ اسلات نود."""
+    nodes = get_all_nodes()
+    return {
+        "nodes": nodes,
+        "max_slots": MAX_NODES,
+        "used_slots": sum(1 for n in nodes if n.get("address")),
+    }
+
+
+@app.post("/api/nodes")
+async def api_add_node(request: Request, _=Depends(require_auth)):
+    """افزودن نود به یه اسلات."""
+    body = await request.json()
+    slot = int(body.get("slot") or 0)
+    name = str(body.get("name") or "").strip()
+    address = str(body.get("address") or "").strip()
+    token = str(body.get("api_token") or "").strip()
+    
+    # اعتبارسنجی
+    if slot < 1 or slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail=f"Slot must be between 1 and {MAX_NODES}")
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if not address:
+        raise HTTPException(status_code=400, detail="Address is required")
+    if not token:
+        raise HTTPException(status_code=400, detail="API token is required")
+    
+    # چک کن اسلات وجود داره
+    existing = get_node_by_slot(slot)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Slot {slot} not found")
+    
+    # ذخیره توی دیتابیس
+    ok = update_node(slot, name, address, token)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to update node")
+    
+    # تست اتصال خودکار
+    test_result = await test_node_connection(slot)
+    
+    logger.info(f"[NODE API] Node added to slot {slot}: {name}")
+    
+    return {
+        "ok": True,
+        "slot": slot,
+        "name": name,
+        "test": test_result,
+    }
+
+
+@app.delete("/api/nodes/{slot}")
+async def api_remove_node(slot: int, _=Depends(require_auth)):
+    """خالی کردن یه اسلات (پاک کردن اطلاعات نود)."""
+    if slot < 1 or slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail="Invalid slot")
+    
+    node = get_node_by_slot(slot)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"Slot {slot} not found")
+    
+    ok = clear_node(slot)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to clear node")
+    
+    logger.info(f"[NODE API] Slot {slot} cleared")
+    return {"ok": True, "slot": slot}
+
+
+@app.post("/api/nodes/{slot}/test")
+async def api_test_node(slot: int, _=Depends(require_auth)):
+    """تست اتصال با یه نود."""
+    if slot < 1 or slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail="Invalid slot")
+    
+    result = await test_node_connection(slot)
+    return result
+
+
+@app.post("/api/nodes/test-all")
+async def api_test_all_nodes(_=Depends(require_auth)):
+    """تست همه‌ی نودها."""
+    results = await test_all_nodes()
+    return {"results": results}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 🌐 NODE API — پاسخ به مستر (روی همه پنل‌ها فعاله)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/node/handshake")
+async def api_node_handshake(request: Request):
+    """پاسخ به تست اتصال از مستر.
+    
+    این endpoint روی همه‌ی پنل‌ها فعاله.
+    مستر با فرستادن توکن درخواست می‌ده و این پاسخ می‌ده.
+    """
+    # توکن رو از هدر بگیر
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    
+    if not my_token:
+        raise HTTPException(status_code=500, detail="This panel has no API token set")
+    if token != my_token:
+        logger.warning(f"[NODE] Handshake failed: invalid token from {get_request_ip(request)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # پاسخ با اطلاعات پنل
+    async with connections_lock:
+        active_conns = len(connections)
+    
+    return {
+        "status": "ok",
+        "panel_name": get_panel_name(),
+        "panel_flag": get_panel_flag(),
+        "panel_role": get_panel_role(),
+        "version": PANEL_VERSION,
+        "stats": {
+            "users_count": len(LINKS),
+            "active_connections": active_conns,
+            "total_traffic_mb": round(stats["total_bytes"] / (1024 * 1024), 2),
+            "uptime": uptime(),
+        }
+    }
+
+
+@app.post("/api/node/receive-user")
+async def api_node_receive_user(request: Request):
+    """دریافت کاربر از مستر.
+    
+    وقتی مستر یه کاربر جدید می‌سازه، این endpoint روی همه نودها صدا زده
+    می‌شه تا کاربر رو اینجا هم بسازه.
+    """
+    # چک توکن
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        logger.warning(f"[NODE] receive-user: invalid token from {get_request_ip(request)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    label = body.get("label")
+    
+    if not uid or not label:
+        raise HTTPException(status_code=400, detail="uuid and label are required")
+    
+    # اگه کاربر از قبل هست، آپدیت کن
+    variants = body.get("variants") or default_variants()
+    limit_bytes = int(body.get("limit_bytes") or 0)
+    expires_at = body.get("expires_at")
+    max_connections = int(body.get("max_connections") or 0)
+    
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            # آپدیت
+            LINKS[uid]["label"] = label
+            LINKS[uid]["limit_bytes"] = limit_bytes
+            LINKS[uid]["expires_at"] = expires_at
+            LINKS[uid]["max_connections"] = max_connections
+            LINKS[uid]["variants"] = variants
+            logger.info(f"[NODE] Updated existing user '{label}' ({uid[:8]})")
+        else:
+            # ساخت جدید
+            LINKS[uid] = {
+                "label": label,
+                "limit_bytes": limit_bytes,
+                "used_bytes": 0,
+                "max_connections": max_connections,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "active": True,
+                "expires_at": expires_at,
+                "variants": variants,
+                "port": DEFAULT_PORT,
+                "external_config": "",
+            }
+            logger.info(f"[NODE] Received new user '{label}' ({uid[:8]}) from master")
+    
+    await save_db()
+    return {"status": "ok", "uuid": uid, "action": "created" if uid not in LINKS else "updated"}
+
+
+@app.get("/api/node/stats")
+async def api_node_stats(request: Request):
+    """آمار کامل یه نود (برای مستر)."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    async with connections_lock:
+        active_conns = len(connections)
+    
+    return {
+        "status": "ok",
+        "panel_name": get_panel_name(),
+        "panel_flag": get_panel_flag(),
+        "users_count": len(LINKS),
+        "active_connections": active_conns,
+        "total_traffic_mb": round(stats["total_bytes"] / (1024 * 1024), 2),
+        "uptime": uptime(),
+        "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "memory_percent": psutil.virtual_memory().percent,
+    }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
+    
