@@ -355,6 +355,102 @@ def variants_from_body(body: dict, base: dict | None = None) -> dict:
         result[auth] = cur
     return sanitize_variants(result)
 
+    # ═══════════════════════════════════════════════════════════════════════
+# 🌐 NODE SYSTEM — لیست کشورها + توابع پایه
+# ═══════════════════════════════════════════════════════════════════════
+
+COUNTRIES = {
+    "nl": {"name": "Netherlands",   "flag": "🇳🇱"},
+    "us": {"name": "United States", "flag": "🇺🇸"},
+    "sg": {"name": "Singapore",     "flag": "🇸🇬"},
+    "fi": {"name": "Finland",       "flag": "🇫🇮"},
+    "de": {"name": "Germany",       "flag": "🇩🇪"},
+    "jp": {"name": "Japan",         "flag": "🇯🇵"},
+    "gb": {"name": "United Kingdom","flag": "🇬🇧"},
+    "fr": {"name": "France",        "flag": "🇫🇷"},
+    "tr": {"name": "Turkey",        "flag": "🇹🇷"},
+    "ae": {"name": "UAE",           "flag": "🇦🇪"},
+    "ca": {"name": "Canada",        "flag": "🇨🇦"},
+    "au": {"name": "Australia",     "flag": "🇦🇺"},
+    "it": {"name": "Italy",         "flag": "🇮🇹"},
+    "es": {"name": "Spain",         "flag": "🇪🇸"},
+    "se": {"name": "Sweden",        "flag": "🇸🇪"},
+    "ch": {"name": "Switzerland",   "flag": "🇨🇭"},
+    "at": {"name": "Austria",       "flag": "🇦🇹"},
+    "pl": {"name": "Poland",        "flag": "🇵🇱"},
+    "ru": {"name": "Russia",        "flag": "🇷🇺"},
+    "in": {"name": "India",         "flag": "🇮🇳"},
+    "kr": {"name": "South Korea",   "flag": "🇰🇷"},
+    "hk": {"name": "Hong Kong",     "flag": "🇭🇰"},
+    "ir": {"name": "Iran",          "flag": "🇮🇷"},
+    "br": {"name": "Brazil",        "flag": "🇧🇷"},
+}
+
+MAX_NODES = 5
+
+NODE_SETTINGS_KEYS = (
+    "panel_role",
+    "panel_name",
+    "panel_country",
+    "panel_flag",
+    "my_api_token",
+    "master_url",
+    "master_token",
+)
+
+
+def generate_node_token() -> str:
+    """توکن امن برای احراز هویت بین مستر و نودها تولید می‌کنه."""
+    return "nd_" + secrets.token_urlsafe(32)
+
+
+def get_panel_role() -> str:
+    """نقش این پنل رو برمی‌گردونه: 'master' یا 'slave'."""
+    return CONFIG.get("panel_role", "master")
+
+
+def get_panel_flag() -> str:
+    """پرچم این پنل رو برمی‌گردونه."""
+    return CONFIG.get("panel_flag", "🇳🇱")
+
+
+def get_panel_name() -> str:
+    """نام این پنل رو برمی‌گردونه."""
+    return CONFIG.get("panel_name", "Master")
+
+
+def init_node_settings():
+    """اگه تنظیمات نود وجود نداشته باشه، مقدار پیش‌فرض می‌ذاره."""
+    conn = get_db()
+    try:
+        existing = set()
+        cur = conn.execute("SELECT key FROM settings")
+        for row in cur.fetchall():
+            existing.add(row["key"])
+        
+        defaults = {
+            "panel_role": "master",
+            "panel_name": "Master-Panel",
+            "panel_country": "nl",
+            "panel_flag": "🇳🇱",
+            "my_api_token": generate_node_token(),
+            "master_url": "",
+            "master_token": "",
+        }
+        
+        for key, val in defaults.items():
+            if key not in existing:
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)",
+                    (key, val)
+                )
+                CONFIG[key] = val
+                logger.info(f"[NODE] Initialized setting '{key}'")
+        
+        conn.commit()
+    finally:
+        conn.close()
+
 DB_FILE = "/data/panel.db" if os.path.isdir("/data") else "panel.db"
 if os.path.isdir("/data"):
     logger.warning(f"[STARTUP] Persistent volume detected at /data -> using {DB_FILE} (data survives restarts/deploys)")
@@ -615,6 +711,28 @@ def init_db():
             latest_url TEXT,
             checked_at REAL
         );
+        CREATE TABLE IF NOT EXISTS nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot INTEGER UNIQUE CHECK(slot BETWEEN 1 AND 5),
+            name TEXT NOT NULL,
+            country_code TEXT NOT NULL,
+            flag TEXT NOT NULL,
+            address TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            status TEXT DEFAULT 'unknown',
+            enabled INTEGER DEFAULT 1,
+            last_check REAL,
+            last_stats_json TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS node_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT NOT NULL,
+            node_slot INTEGER NOT NULL,
+            used_bytes INTEGER DEFAULT 0,
+            last_report REAL,
+            UNIQUE(uuid, node_slot)
+        );
     """)
     conn.commit()
     # Migrate older DBs created before protocol/fingerprint/alpn/port existed
@@ -715,7 +833,13 @@ async def save_db():
                 for addr in CUSTOM_ADDRESSES:
                     conn.execute("INSERT INTO custom_addresses (address) VALUES (?)", (addr,))
             # Save settings
-            for key in ("telegram_token", "telegram_admin_id", "bot_lang", "railway_token", "notify_connections"):
+            settings_keys = (
+                "telegram_token", "telegram_admin_id", "bot_lang", 
+                "railway_token", "notify_connections",
+                "panel_role", "panel_name", "panel_country", "panel_flag",
+                "my_api_token", "master_url", "master_token",
+            )
+            for key in settings_keys:
                 conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, CONFIG.get(key, "")))
             conn.commit()
     except Exception as e:
@@ -849,6 +973,7 @@ async def startup():
     global http_client
     init_db()
     load_db()
+    init_node_settings()    
     migrate_legacy_uuids()
     limits = httpx.Limits(max_connections=500, max_keepalive_connections=100)
     timeout = httpx.Timeout(30.0, connect=10.0)
