@@ -4140,10 +4140,10 @@ body[dir="rtl"]{direction:rtl;text-align:right}
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
         <span class="nav-label" data-en="Clean IP" data-fa="آی‌پی تمیز">Clean IP</span>
       </button>
-      <button class="nav-item" data-page="notifications">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
-        <span class="nav-label" data-en="Notifications" data-fa="اعلانات">Notifications</span>
-        <span class="nav-badge" id="notif-badge" style="display:none">0</span>
+      <button class="nav-item" data-page="nodes">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="6" rx="2"/><rect x="2" y="14" width="20" height="6" rx="2"/><circle cx="6" cy="7" r="1" fill="currentColor"/><circle cx="6" cy="17" r="1" fill="currentColor"/></svg>
+        <span class="nav-label" data-en="Nodes" data-fa="نودها">نودها</span>
+        <span class="nav-badge" id="nodes-badge" style="display:none">0</span>
       </button>
       <button class="nav-item" data-page="security">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
@@ -4282,20 +4282,19 @@ body[dir="rtl"]{direction:rtl;text-align:right}
       </div>
     </section>
 
-    <!-- Notifications -->
-    <section class="page" id="page-notifications">
+    <!-- Nodes -->
+    <section class="page" id="page-nodes">
       <div class="page-header">
-        <div><div class="page-title" data-en="Notifications" data-fa="اعلانات">Notifications</div><div class="page-sub" data-en="Updates, alerts & system messages" data-fa="بروزرسانی‌ها، هشدارها و پیام‌های سیستم">Updates, alerts & system messages</div></div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-ghost btn-sm" onclick="markAllSeen()" data-en="Mark all read" data-fa="خوانده شدن همه">Mark all read</button>
-          <button class="btn btn-danger btn-sm" onclick="clearNotifs()" data-en="Clear all" data-fa="حذف همه">Clear all</button>
+        <div>
+          <div class="page-title" data-en="Nodes" data-fa="نودها">نودها</div>
+          <div class="page-sub" data-en="Manage up to 5 nodes (Master + Slaves)" data-fa="مدیریت حداکثر ۵ نود (مستر + نودها)">مدیریت حداکثر ۵ نود</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-ghost" onclick="testAllNodes()" data-en="🔍 Test All" data-fa="🔍 تست همه">🔍 تست همه</button>
         </div>
       </div>
-      <div class="card" style="padding:0;overflow:hidden">
-        <div id="notif-list" style="padding:4px 0">
-          <div class="empty" data-en="No notifications" data-fa="هیچ اعلانی وجود ندارد">No notifications</div>
-        </div>
-      </div>
+
+      <div id="nodes-list" style="display:flex;flex-direction:column;gap:12px"></div>
     </section>
 
     <!-- Clean IP -->
@@ -4661,6 +4660,44 @@ body[dir="rtl"]{direction:rtl;text-align:right}
     <button class="btn btn-gold" onclick="addAddrs()" style="width:100%;justify-content:center;margin-top:12px;padding:12px" data-en="ADD ALL" data-fa="افزودن همه">ADD ALL</button>
   </div>
 </div>
+<div class="mo" id="mo-node" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="mo-box">
+    <button class="mo-close" onclick="document.getElementById('mo-node').classList.remove('show')">✕</button>
+    <div class="mo-title" id="mo-node-title">ADD NODE</div>
+
+    <input type="hidden" id="node-slot">
+
+    <div class="fg" style="margin-bottom:14px">
+      <div id="node-slot-info" style="padding:12px 14px;background:var(--surface3);border:1px solid var(--border);border-radius:10px;font-size:13px;text-align:center">
+        <!-- اطلاعات اسلات اینجا نمایش داده می‌شه -->
+      </div>
+    </div>
+
+    <div class="fg">
+      <label class="fl" data-en="Node Name" data-fa="نام نود">نام نود</label>
+      <input class="fi" type="text" id="node-name" placeholder="e.g. USA-1">
+    </div>
+
+    <div class="fg">
+      <label class="fl" data-en="Panel Address" data-fa="آدرس پنل">آدرس پنل</label>
+      <input class="fi" type="text" id="node-address" placeholder="https://usa-panel.up.railway.app" style="font-family:monospace;font-size:12px">
+      <div style="font-size:10px;color:var(--text3);margin-top:4px" data-en="Full URL of the node panel (with https://)" data-fa="آدرس کامل پنل نود (با https://)">آدرس کامل پنل نود (با https://)</div>
+    </div>
+
+    <div class="fg">
+      <label class="fl" data-en="API Token" data-fa="توکن API">توکن API</label>
+      <input class="fi" type="text" id="node-token" placeholder="nd_xxxxxxxxxxxxxxxxxxx" style="font-family:monospace;font-size:12px">
+      <div style="font-size:10px;color:var(--text3);margin-top:4px" data-en="Get this from the node panel's Settings → Panel Role → Copy Token" data-fa="از پنل نود → تنظیمات → نقش پنل → کپی توکن بگیر">از پنل نود: تنظیمات → نقش پنل → کپی توکن</div>
+    </div>
+
+    <div id="node-test-result" style="display:none;padding:10px 12px;border-radius:8px;font-size:12px;margin-bottom:10px"></div>
+
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn btn-gold" onclick="saveNode()" style="flex:1;justify-content:center;padding:12px" id="node-save-btn" data-en="SAVE" data-fa="ذخیره">ذخیره</button>
+      <button class="btn btn-ghost" onclick="document.getElementById('mo-node').classList.remove('show')" style="padding:12px" data-en="Cancel" data-fa="انصراف">انصراف</button>
+    </div>
+  </div>
+</div>
 
 <script>
 function $(s){return document.querySelector(s)}
@@ -4775,6 +4812,7 @@ function showDashboard(){
   loadAddrs();
   loadSettings();
   loadPanelRole();
+  loadNodes();      
   loadNotifs();
   updateNotifBadge();
   connectLogsWS();
@@ -5166,6 +5204,289 @@ async function saveAllSettings(){
     else toast('Failed to save settings',true);
   }catch(e){toast('Error saving settings',true)}
 }
+
+// ── Node Management ─────────────────────────────────────────────────────
+
+async function loadNodes(){
+  try{
+    const r = await fetch('/api/nodes');
+    if(!r.ok){
+      console.error('Failed to load nodes:', r.status);
+      return;
+    }
+    const d = await r.json();
+    renderNodesList(d.nodes || []);
+    
+    // آپدیت badge
+    const usedCount = (d.nodes || []).filter(n => n.address).length;
+    const badge = $m('nodes-badge');
+    if(badge){
+      if(usedCount > 0){
+        badge.style.display = '';
+        badge.textContent = usedCount + '/5';
+      }else{
+        badge.style.display = 'none';
+      }
+    }
+  }catch(e){
+    console.error('Error loading nodes:', e);
+  }
+}
+
+function renderNodesList(nodes){
+  const el = $m('nodes-list');
+  if(!el) return;
+  
+  if(!nodes || !nodes.length){
+    el.innerHTML = '<div class="empty">' + (lang === 'fa' ? 'هیچ نودی یافت نشد' : 'No nodes found') + '</div>';
+    return;
+  }
+  
+  el.innerHTML = nodes.map(n => {
+    const isEmpty = !n.address;
+    const statusColor = {
+      'online': 'var(--green)',
+      'offline': 'var(--red)',
+      'error': 'var(--red)',
+      'empty': 'var(--text3)',
+      'unknown': 'var(--yellow)',
+    }[n.status] || 'var(--text3)';
+    
+    const statusIcon = {
+      'online': '🟢',
+      'offline': '🔴',
+      'error': '⚠️',
+      'empty': '⚪',
+      'unknown': '🟡',
+    }[n.status] || '⚪';
+    
+    const statusText = {
+      'online': lang === 'fa' ? 'آنلاین' : 'Online',
+      'offline': lang === 'fa' ? 'آفلاین' : 'Offline',
+      'error': lang === 'fa' ? 'خطا' : 'Error',
+      'empty': lang === 'fa' ? 'خالی' : 'Empty',
+      'unknown': lang === 'fa' ? 'نامشخص' : 'Unknown',
+    }[n.status] || 'Unknown';
+    
+    if(isEmpty){
+      // کارت خالی
+      return `
+        <div class="card" style="margin:0;padding:16px;border:1px dashed var(--border)">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="font-size:24px;font-weight:800;color:var(--text3);width:36px;text-align:center">${n.slot}</div>
+            <div style="font-size:28px">${n.flag}</div>
+            <div style="flex:1;min-width:120px">
+              <div style="font-weight:700;font-size:14px">${esc(n.name)}</div>
+              <div style="font-size:11px;color:var(--text3);margin-top:2px">${lang === 'fa' ? 'اسلات خالی' : 'Empty slot'}</div>
+            </div>
+            <button class="btn btn-gold" onclick="showAddNodeMo(${n.slot})">
+              ➕ ${lang === 'fa' ? 'افزودن نود' : 'Add Node'}
+            </button>
+          </div>
+        </div>
+      `;
+    }
+    
+    // کارت پر
+    return `
+      <div class="card" style="margin:0;padding:16px;border:1px solid var(--border2)">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px">
+          <div style="font-size:24px;font-weight:800;color:var(--text3);width:36px;text-align:center">${n.slot}</div>
+          <div style="font-size:28px">${n.flag}</div>
+          <div style="flex:1;min-width:140px">
+            <div style="font-weight:700;font-size:14px">${esc(n.name)}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr;text-align:left">${esc(n.address)}</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;background:${statusColor}22;border:1px solid ${statusColor}66">
+            <span style="font-size:14px">${statusIcon}</span>
+            <span style="font-size:12px;font-weight:700;color:${statusColor}">${statusText}</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="act-btn act-edit" onclick="showAddNodeMo(${n.slot}, true)">✏️ ${tr('edit')}</button>
+          <button class="act-btn act-copy" onclick="testNode(${n.slot})">🔍 ${lang === 'fa' ? 'تست' : 'Test'}</button>
+          <button class="act-btn act-del" onclick="removeNode(${n.slot})">🗑️ ${tr('del')}</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function showAddNodeMo(slot, isEdit){
+  // لود کردن اطلاعات اسلات
+  try{
+    const r = await fetch('/api/nodes');
+    if(!r.ok) throw new Error('Failed to load');
+    const d = await r.json();
+    const node = (d.nodes || []).find(n => n.slot === slot);
+    if(!node) throw new Error('Slot not found');
+    
+    // تنظیم مودال
+    $m('node-slot').value = slot;
+    $m('mo-node-title').textContent = isEdit 
+      ? (lang === 'fa' ? `ویرایش نود اسلات ${slot}` : `Edit node slot ${slot}`)
+      : (lang === 'fa' ? `افزودن نود به اسلات ${slot}` : `Add node to slot ${slot}`);
+    
+    // نمایش اطلاعات اسلات
+    $m('node-slot-info').innerHTML = `
+      <div style="font-size:32px;margin-bottom:4px">${node.flag}</div>
+      <div style="font-weight:700">${esc(node.name)}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">${lang === 'fa' ? 'اسلات' : 'Slot'} #${slot}</div>
+    `;
+    
+    // پر کردن فیلدها
+    $m('node-name').value = node.address ? node.name : '';
+    $m('node-address').value = node.address || '';
+    $m('node-token').value = '';
+    
+    // مخفی کردن نتیجه تست
+    $m('node-test-result').style.display = 'none';
+    
+    // نمایش مودال
+    $m('mo-node').classList.add('show');
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+async function saveNode(){
+  const slot = parseInt($m('node-slot').value);
+  const name = $m('node-name').value.trim();
+  const address = $m('node-address').value.trim();
+  const token = $m('node-token').value.trim();
+  
+  if(!name){
+    toast(lang === 'fa' ? 'نام نود الزامی است' : 'Node name is required', true);
+    return;
+  }
+  if(!address){
+    toast(lang === 'fa' ? 'آدرس پنل الزامی است' : 'Panel address is required', true);
+    return;
+  }
+  if(!token){
+    toast(lang === 'fa' ? 'توکن API الزامی است' : 'API token is required', true);
+    return;
+  }
+  
+  $m('node-save-btn').disabled = true;
+  $m('node-save-btn').textContent = lang === 'fa' ? 'در حال ذخیره...' : 'Saving...';
+  
+  try{
+    const r = await fetch('/api/nodes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        slot: slot,
+        name: name,
+        address: address,
+        api_token: token,
+      })
+    });
+    
+    if(!r.ok){
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || 'Error');
+    }
+    
+    const d = await r.json();
+    
+    // نمایش نتیجه تست
+    const test = d.test || {};
+    const resultEl = $m('node-test-result');
+    resultEl.style.display = '';
+    
+    if(test.ok){
+      resultEl.style.background = 'var(--green-dim)';
+      resultEl.style.color = 'var(--green)';
+      resultEl.style.border = '1px solid rgba(74,222,128,0.3)';
+      resultEl.textContent = `✅ ${lang === 'fa' ? 'اتصال موفق!' : 'Connected!'}`;
+    }else{
+      resultEl.style.background = 'var(--red-dim)';
+      resultEl.style.color = 'var(--red)';
+      resultEl.style.border = '1px solid rgba(248,113,113,0.3)';
+      resultEl.textContent = `❌ ${test.message || (lang === 'fa' ? 'اتصال ناموفق' : 'Connection failed')}`;
+    }
+    
+    // آپدیت لیست
+    await loadNodes();
+    
+    // بستن مودال بعد از ۱ ثانیه
+    setTimeout(() => {
+      $m('mo-node').classList.remove('show');
+    }, 1200);
+    
+    if(test.ok){
+      toast(lang === 'fa' ? '✅ نود با موفقیت اضافه شد' : '✅ Node added successfully');
+    }else{
+      toast(lang === 'fa' ? '⚠️ نود ذخیره شد ولی اتصال برقرار نشد' : '⚠️ Node saved but connection failed', true);
+    }
+    
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }finally{
+    $m('node-save-btn').disabled = false;
+    $m('node-save-btn').textContent = lang === 'fa' ? 'ذخیره' : 'Save';
+  }
+}
+
+async function testNode(slot){
+  try{
+    toast(lang === 'fa' ? 'در حال تست...' : 'Testing...');
+    const r = await fetch(`/api/nodes/${slot}/test`, {method: 'POST'});
+    if(!r.ok) throw new Error('Test failed');
+    const d = await r.json();
+    
+    if(d.ok){
+      toast(`✅ ${d.message || 'OK'}`);
+    }else{
+      toast(`❌ ${d.message || 'Failed'}`, true);
+    }
+    
+    // آپدیت لیست
+    await loadNodes();
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+async function testAllNodes(){
+  try{
+    toast(lang === 'fa' ? 'در حال تست همه نودها...' : 'Testing all nodes...');
+    const r = await fetch('/api/nodes/test-all', {method: 'POST'});
+    if(!r.ok) throw new Error('Test failed');
+    const d = await r.json();
+    
+    const online = (d.results || []).filter(x => x.ok).length;
+    const total = (d.results || []).length;
+    
+    toast(`✅ ${online}/${total} ${lang === 'fa' ? 'نود آنلاین' : 'nodes online'}`);
+    await loadNodes();
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+async function removeNode(slot){
+  if(!confirm(lang === 'fa' ? 'حذف این نود؟' : 'Remove this node?')) return;
+  
+  try{
+    const r = await fetch(`/api/nodes/${slot}`, {method: 'DELETE'});
+    if(!r.ok) throw new Error('Delete failed');
+    toast(lang === 'fa' ? '✅ نود حذف شد' : '✅ Node removed');
+    await loadNodes();
+  }catch(e){
+    toast(e.message || 'Error', true);
+  }
+}
+
+// وقتی کاربر روی صفحه Nodes کلیک می‌کنه
+const originalSwitchPage = switchPage;
+switchPage = function(id){
+  originalSwitchPage(id);
+  if(id === 'nodes'){
+    loadNodes();
+  }
+};
 
 // ── Panel Role & Node Settings ─────────────────────────────────────────
 let panelCountries = [];
