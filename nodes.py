@@ -1,0 +1,355 @@
+# ═══════════════════════════════════════════════════════════════════════
+# nodes.py — منطق سیستم نود (Node System)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# این فایل مسئول ارتباط پنل مستر با نودهاست.
+# وقتی مستر یه کاربر می‌سازه، از توابع این فایل استفاده می‌کنه تا کاربر
+# رو روی همه‌ی نودها هم بسازه.
+#
+# ═══════════════════════════════════════════════════════════════════════
+
+import asyncio
+import json
+import time
+from datetime import datetime, timezone
+
+import httpx
+
+from main import (
+    logger,
+    get_db,
+    CONFIG,
+    generate_node_token,
+    COUNTRIES,
+    MAX_NODES,
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ۵ اسلات پیش‌فرض با پرچم (طبق خواسته‌ی کاربر)
+# ═══════════════════════════════════════════════════════════════════════
+
+DEFAULT_SLOTS = [
+    {"slot": 1, "flag": "🇺🇸", "country_code": "us", "label": "America"},
+    {"slot": 2, "flag": "🇸🇬", "country_code": "sg", "label": "Singapore"},
+    {"slot": 3, "flag": "🇳🇱", "country_code": "nl", "label": "Netherlands"},
+    {"slot": 4, "flag": "🇫🇮", "country_code": "fi", "label": "Finland"},
+    {"slot": 5, "flag": "🌐", "country_code": "xx", "label": "Variable"},
+]
+
+
+def init_default_slots():
+    """
+    اگه جدول nodes خالی باشه، ۵ اسلات پیش‌فرض رو می‌سازه.
+    (اسلات‌ها با address و token خالی می‌شن، آماده برای پر شدن توسط ادمین)
+    """
+    conn = get_db()
+    try:
+        cur = conn.execute("SELECT COUNT(*) as cnt FROM nodes")
+        row = cur.fetchone()
+        if row and row["cnt"] > 0:
+            logger.info(f"[NODE] {row['cnt']} node slot(s) already exist. Skipping default init.")
+            return
+        
+        now = datetime.now(timezone.utc).isoformat()
+        for s in DEFAULT_SLOTS:
+            conn.execute("""
+                INSERT INTO nodes (slot, name, country_code, flag, address, api_token, status, enabled, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                s["slot"],
+                s["label"],
+                s["country_code"],
+                s["flag"],
+                "",           # address خالی
+                "",           # api_token خالی
+                "empty",      # وضعیت: empty
+                1,
+                now,
+            ))
+        conn.commit()
+        logger.info(f"[NODE] Initialized {len(DEFAULT_SLOTS)} default node slots (🇺🇸 🇸🇬 🇳🇱 🇫🇮 🌐)")
+    except Exception as e:
+        logger.error(f"[NODE] Error initializing default slots: {e}")
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# توابع اصلی مدیریت نودها
+# ═══════════════════════════════════════════════════════════════════════
+
+def get_all_nodes() -> list[dict]:
+    """لیست همه‌ی اسلات‌ها (چه خالی چه پر) رو برمی‌گردونه."""
+    conn = get_db()
+    try:
+        cur = conn.execute("""
+            SELECT id, slot, name, country_code, flag, address, api_token,
+                   status, enabled, last_check, last_stats_json, created_at
+            FROM nodes
+            ORDER BY slot ASC
+        """)
+        nodes = []
+        for row in cur.fetchall():
+            node = dict(row)
+            # api_token رو توی خروجی نذار (امنیت)
+            node["has_token"] = bool(node.pop("api_token", None))
+            # آدرس رو کامل برنگردون
+            node["address"] = node.get("address", "")
+            nodes.append(node)
+        return nodes
+    finally:
+        conn.close()
+
+
+def get_node_by_slot(slot: int) -> dict | None:
+    """یه نود رو بر اساس شماره اسلات برمی‌گردونه (با توکن کامل — فقط برای استفاده داخلی)."""
+    conn = get_db()
+    try:
+        cur = conn.execute("""
+            SELECT id, slot, name, country_code, flag, address, api_token,
+                   status, enabled, last_check, last_stats_json, created_at
+            FROM nodes
+            WHERE slot = ?
+        """, (slot,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def update_node(slot: int, name: str, address: str, api_token: str) -> bool:
+    """اطلاعات یه نود رو آپدیت می‌کنه (وقتی ادمین آدرس و توکن وارد می‌کنه)."""
+    conn = get_db()
+    try:
+        # چک کن اسلات وجود داره
+        cur = conn.execute("SELECT id FROM nodes WHERE slot = ?", (slot,))
+        if cur.fetchone() is None:
+            logger.warning(f"[NODE] Slot {slot} not found")
+            return False
+        
+        conn.execute("""
+            UPDATE nodes
+            SET name = ?, address = ?, api_token = ?, status = 'unknown'
+            WHERE slot = ?
+        """, (name, address, api_token, slot))
+        conn.commit()
+        logger.info(f"[NODE] Slot {slot} updated: name='{name}', address='{address}'")
+        return True
+    finally:
+        conn.close()
+
+
+def clear_node(slot: int) -> bool:
+    """اطلاعات یه نود رو پاک می‌کنه (اسلات خالی می‌شه)."""
+    conn = get_db()
+    try:
+        # اول اطلاعات اسلات رو از دست نده (فقط آدرس و توکن رو پاک کن)
+        cur = conn.execute("SELECT country_code, flag, name FROM nodes WHERE slot = ?", (slot,))
+        row = cur.fetchone()
+        if row is None:
+            return False
+        
+        default = next((s for s in DEFAULT_SLOTS if s["slot"] == slot), None)
+        if default:
+            conn.execute("""
+                UPDATE nodes
+                SET name = ?, address = '', api_token = '', status = 'empty'
+                WHERE slot = ?
+            """, (default["label"], slot))
+        else:
+            conn.execute("""
+                UPDATE nodes
+                SET address = '', api_token = '', status = 'empty'
+                WHERE slot = ?
+            """, (slot,))
+        
+        conn.commit()
+        logger.info(f"[NODE] Slot {slot} cleared")
+        return True
+    finally:
+        conn.close()
+
+
+def update_node_status(slot: int, status: str, stats_json: str | None = None):
+    """وضعیت یه نود رو آپدیت می‌کنه (online/offline/error)."""
+    conn = get_db()
+    try:
+        conn.execute("""
+            UPDATE nodes
+            SET status = ?, last_check = ?, last_stats_json = ?
+            WHERE slot = ?
+        """, (status, time.time(), stats_json, slot))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# تست اتصال با نود (Handshake)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def test_node_connection(slot: int) -> dict:
+    """
+    با یه نود تماس می‌گیره و چک می‌کنه در دسترسه یا نه.
+    
+    Returns:
+        {
+            "ok": bool,
+            "status": str,  # "online" / "offline" / "error"
+            "message": str,
+            "stats": dict | None
+        }
+    """
+    node = get_node_by_slot(slot)
+    if not node:
+        return {"ok": False, "status": "error", "message": f"Slot {slot} not found"}
+    
+    address = (node.get("address") or "").strip()
+    token = (node.get("api_token") or "").strip()
+    
+    if not address:
+        update_node_status(slot, "empty")
+        return {"ok": False, "status": "empty", "message": "Address not set"}
+    if not token:
+        update_node_status(slot, "error")
+        return {"ok": False, "status": "error", "message": "Token not set"}
+    
+    # آدرس رو نرمال کن
+    if not address.startswith("http"):
+        address = "https://" + address
+    address = address.rstrip("/")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            r = await client.get(
+                f"{address}/api/node/handshake",
+                headers={"X-Node-Token": token},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                stats = data.get("stats", {})
+                update_node_status(slot, "online", json.dumps(stats))
+                logger.info(f"[NODE] Slot {slot} ({node['name']}) is ONLINE")
+                return {
+                    "ok": True,
+                    "status": "online",
+                    "message": "Connected successfully",
+                    "stats": stats,
+                }
+            elif r.status_code == 401:
+                update_node_status(slot, "error")
+                return {"ok": False, "status": "error", "message": "Invalid token (401)"}
+            else:
+                update_node_status(slot, "error")
+                return {"ok": False, "status": "error", "message": f"HTTP {r.status_code}"}
+    except httpx.TimeoutException:
+        update_node_status(slot, "offline")
+        return {"ok": False, "status": "offline", "message": "Connection timeout"}
+    except Exception as e:
+        update_node_status(slot, "offline")
+        logger.warning(f"[NODE] Slot {slot} connection failed: {e}")
+        return {"ok": False, "status": "offline", "message": str(e)}
+
+
+async def test_all_nodes() -> list[dict]:
+    """همه‌ی نودهای پر رو تست می‌کنه."""
+    results = []
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        result = await test_node_connection(slot)
+        result["slot"] = slot
+        result["name"] = node.get("name", "")
+        results.append(result)
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ارسال کاربر به نودها
+# ═══════════════════════════════════════════════════════════════════════
+
+async def push_user_to_node(slot: int, user_data: dict) -> dict:
+    """
+    یه کاربر رو به یه نود می‌فرسته.
+    
+    Args:
+        slot: شماره اسلات نود
+        user_data: اطلاعات کاربر شامل:
+            - uuid
+            - label
+            - limit_bytes
+            - used_bytes
+            - expires_at
+            - variants
+            - port
+    
+    Returns:
+        {"ok": bool, "message": str}
+    """
+    node = get_node_by_slot(slot)
+    if not node:
+        return {"ok": False, "message": f"Slot {slot} not found"}
+    
+    address = (node.get("address") or "").strip()
+    token = (node.get("api_token") or "").strip()
+    if not address or not token:
+        return {"ok": False, "message": "Node not configured"}
+    
+    if not address.startswith("http"):
+        address = "https://" + address
+    address = address.rstrip("/")
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            r = await client.post(
+                f"{address}/api/node/receive-user",
+                headers={
+                    "X-Node-Token": token,
+                    "Content-Type": "application/json",
+                },
+                json=user_data,
+            )
+            if r.status_code == 200:
+                return {"ok": True, "message": "User pushed successfully"}
+            else:
+                return {"ok": False, "message": f"HTTP {r.status_code}: {r.text[:200]}"}
+    except Exception as e:
+        logger.warning(f"[NODE] Push to slot {slot} failed: {e}")
+        return {"ok": False, "message": str(e)}
+
+
+async def push_user_to_all_nodes(user_data: dict) -> dict:
+    """یه کاربر رو به همه‌ی نودهای فعال می‌فرسته."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        result = await push_user_to_node(slot, user_data)
+        results[slot] = result
+        if result["ok"]:
+            logger.info(f"[NODE] User '{user_data.get('label')}' pushed to slot {slot} ✅")
+        else:
+            logger.warning(f"[NODE] User '{user_data.get('label')}' push to slot {slot} failed: {result['message']}")
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Health Check خودکار (هر ۶۰ ثانیه)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def node_health_check_loop():
+    """هر ۶۰ ثانیه همه‌ی نودها رو چک می‌کنه."""
+    await asyncio.sleep(30)  # تاخیر اولیه
+    while True:
+        try:
+            await test_all_nodes()
+        except Exception as e:
+            logger.error(f"[NODE] Health check loop error: {e}")
+        await asyncio.sleep(60)
