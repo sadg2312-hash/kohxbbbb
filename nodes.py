@@ -353,3 +353,198 @@ async def node_health_check_loop():
         except Exception as e:
             logger.error(f"[NODE] Health check loop error: {e}")
         await asyncio.sleep(60)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# توابع اضافی برای sync تغییرات کاربر با نودها
+# ═══════════════════════════════════════════════════════════════════════
+
+async def delete_user_from_all_nodes(uid: str) -> dict:
+    """کاربر رو از همه نودهای فعال حذف می‌کنه."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        
+        address = node["address"].rstrip("/")
+        if not address.startswith("http"):
+            address = "https://" + address
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                r = await client.post(
+                    f"{address}/api/node/delete-user",
+                    headers={
+                        "X-Node-Token": node["api_token"],
+                        "Content-Type": "application/json",
+                    },
+                    json={"uuid": uid},
+                )
+                results[slot] = {"ok": r.status_code == 200}
+                if r.status_code == 200:
+                    logger.info(f"[NODE] User {uid[:8]} deleted from slot {slot} ✅")
+        except Exception as e:
+            results[slot] = {"ok": False, "message": str(e)}
+            logger.warning(f"[NODE] Delete from slot {slot} failed: {e}")
+    return results
+
+
+async def sync_user_to_all_nodes(user_data: dict) -> dict:
+    """اطلاعات کاربر رو روی همه نودها sync می‌کنه."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        result = await push_user_to_node(slot, user_data)
+        results[slot] = result
+    return results
+
+
+async def reset_usage_on_all_nodes(uid: str) -> dict:
+    """مصرف کاربر رو روی همه نودها صفر می‌کنه."""
+    results = {}
+    for s in DEFAULT_SLOTS:
+        slot = s["slot"]
+        node = get_node_by_slot(slot)
+        if not node or not node.get("address"):
+            continue
+        
+        address = node["address"].rstrip("/")
+        if not address.startswith("http"):
+            address = "https://" + address
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                r = await client.post(
+                    f"{address}/api/node/reset-usage",
+                    headers={
+                        "X-Node-Token": node["api_token"],
+                        "Content-Type": "application/json",
+                    },
+                    json={"uuid": uid},
+                )
+                results[slot] = {"ok": r.status_code == 200}
+        except Exception as e:
+            results[slot] = {"ok": False, "message": str(e)}
+    return results
+
+async def get_config_from_node(slot: int, uid: str) -> str | None:
+    """
+    از یه نود می‌پرسه کانفیگ کاربر چیه.
+    
+    Returns:
+        کانفیگ (vless://... یا trojan://...) یا None اگه نود آفلاین/خطا بود
+    """
+    node = get_node_by_slot(slot)
+    if not node:
+        return None
+    
+    address = (node.get("address") or "").strip()
+    token = (node.get("api_token") or "").strip()
+    if not address or not token:
+        return None
+    
+    if not address.startswith("http"):
+        address = "https://" + address
+    address = address.rstrip("/")
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            r = await client.get(
+                f"{address}/api/node/get-config",
+                headers={"X-Node-Token": token},
+                params={"uuid": uid},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return data.get("config")
+            else:
+                logger.warning(f"[NODE] get-config from slot {slot} returned {r.status_code}")
+                return None
+    except Exception as e:
+        logger.warning(f"[NODE] get-config from slot {slot} failed: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# گزارش‌دهی خودکار مصرف به مستر (روی نودها اجرا می‌شه)
+# ═══════════════════════════════════════════════════════════════════════
+
+async def report_usage_to_master_loop():
+    """
+    هر ۳۰ ثانیه، مصرف همه کاربرا رو به مستر گزارش می‌ده.
+    
+    فقط روی پنل‌هایی اجرا می‌شه که role=slave هستن.
+    """
+    await asyncio.sleep(15)  # تاخیر اولیه
+    
+    while True:
+        try:
+            # اگه master هستیم، کاری نکن
+            role = CONFIG.get("panel_role", "master")
+            if role != "slave":
+                await asyncio.sleep(30)
+                continue
+            
+            # master_url و master_token رو بگیر
+            master_url = (CONFIG.get("master_url") or "").strip()
+            master_token = (CONFIG.get("master_token") or "").strip()
+            
+            if not master_url or not master_token:
+                await asyncio.sleep(30)
+                continue
+            
+            # آدرس رو نرمال کن
+            if not master_url.startswith("http"):
+                master_url = "https://" + master_url
+            master_url = master_url.rstrip("/")
+            
+            # slot این پنل رو از مستر بپرس (یا از CONFIG)
+            my_slot = int(CONFIG.get("panel_slot") or 0)
+            if my_slot < 1 or my_slot > MAX_NODES:
+                logger.warning(f"[NODE] Invalid panel_slot: {my_slot}, skipping report")
+                await asyncio.sleep(30)
+                continue
+            
+            # مصرف همه کاربرا رو جمع کن
+            reports = []
+            async with LINKS_LOCK:
+                for uid, link in LINKS.items():
+                    reports.append({
+                        "uuid": uid,
+                        "used_bytes": int(link.get("used_bytes", 0)),
+                    })
+            
+            if not reports:
+                await asyncio.sleep(30)
+                continue
+            
+            # بفرست به مستر
+            try:
+                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                    r = await client.post(
+                        f"{master_url}/api/node/report-usage",
+                        headers={
+                            "X-Node-Token": master_token,
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "node_slot": my_slot,
+                            "reports": reports,
+                        },
+                    )
+                    if r.status_code == 200:
+                        logger.debug(f"[NODE] Reported {len(reports)} users to master")
+                    else:
+                        logger.warning(f"[NODE] Report failed: HTTP {r.status_code}")
+            except Exception as e:
+                logger.warning(f"[NODE] Report to master failed: {e}")
+        
+        except Exception as e:
+            logger.error(f"[NODE] report_usage loop error: {e}")
+        
+        await asyncio.sleep(30)  # ۳۰ ثانیه صبر
