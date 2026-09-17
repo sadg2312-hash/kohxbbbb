@@ -4341,6 +4341,66 @@ body[dir="rtl"]{direction:rtl;text-align:right}
     <section class="page" id="page-settings">
       <div class="page-header"><div><div class="page-title" data-en="Settings" data-fa="تنظیمات">Settings</div><div class="page-sub" data-en="Railway Permanent Database & Preferences" data-fa="دیتابیس دائمی Railway و تنظیمات">Railway Permanent Database & Preferences</div></div></div>
 
+        <!-- Panel Role & Node Settings -->
+      <div class="card" style="border:1px solid rgba(96,165,250,0.3);margin-bottom:14px">
+        <div class="card-hd">
+          <div class="card-title" style="color:var(--gold)">🌐 <span data-en="Panel Role & Node Settings" data-fa="نقش پنل و تنظیمات نود">نقش پنل و تنظیمات نود</span></div>
+          <span id="prole-status" style="font-size:11px;color:var(--text3)">-</span>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:12px;line-height:1.6" data-en="Choose whether this panel acts as a Master (central) or as a Node (Slave). If Node, copy the API token and enter it in the Master panel." data-fa="انتخاب کنید که این پنل به عنوان Master (مرکزی) یا Node (نود) عمل کند. اگر نود، توکن API را کپی کرده و در پنل Master وارد کنید.">
+          انتخاب کنید که این پنل به عنوان Master (مرکزی) یا Node (نود) عمل کند. اگر نود، توکن API را کپی کرده و در پنل Master وارد کنید.
+        </div>
+
+        <!-- Role Selector -->
+        <div class="fg">
+          <label class="fl" data-en="Panel Role" data-fa="نقش پنل">نقش پنل</label>
+          <div style="display:flex;gap:10px;margin-top:6px">
+            <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;cursor:pointer;flex:1;transition:all .2s" id="prole-master-label">
+              <input type="radio" name="panel_role" value="master" id="prole-master" style="accent-color:var(--gold)">
+              <span style="font-weight:700">🔑 Master</span>
+              <span style="font-size:10px;color:var(--text3)" data-en="(Central)" data-fa="(مرکزی)">(مرکزی)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:10px;cursor:pointer;flex:1;transition:all .2s" id="prole-slave-label">
+              <input type="radio" name="panel_role" value="slave" id="prole-slave" style="accent-color:var(--gold)">
+              <span style="font-weight:700">🖥️ Node</span>
+              <span style="font-size:10px;color:var(--text3)" data-en="(Slave)" data-fa="(نود)">(نود)</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Panel Name -->
+        <div class="fg">
+          <label class="fl" data-en="Panel Name" data-fa="نام پنل">نام پنل</label>
+          <input class="fi" type="text" id="prole-name" placeholder="e.g. Netherlands-1">
+        </div>
+
+        <!-- Panel Country -->
+        <div class="fg">
+          <label class="fl" data-en="Country / Flag" data-fa="کشور / پرچم">کشور / پرچم</label>
+          <select class="fs" id="prole-country">
+            <option value="">Loading countries...</option>
+          </select>
+        </div>
+
+        <!-- API Token -->
+        <div class="fg" id="prole-token-section">
+          <label class="fl" data-en="API Token (for Master to connect)" data-fa="توکن API (برای اتصال مستر)">توکن API (برای اتصال مستر)</label>
+          <div style="display:flex;gap:8px;align-items:stretch">
+            <input class="fi" type="text" id="prole-token" readonly style="flex:1;font-family:monospace;font-size:11px;background:var(--surface3)">
+            <button class="btn btn-ghost btn-sm" onclick="copyPanelToken()" id="prole-copy-btn" style="white-space:nowrap">📋 <span data-en="Copy" data-fa="کپی">کپی</span></button>
+            <button class="btn btn-danger btn-sm" onclick="regeneratePanelToken()" id="prole-regen-btn" style="white-space:nowrap">🔄 <span data-en="Regen" data-fa="جدید">جدید</span></button>
+          </div>
+          <div style="font-size:10px;color:var(--red);margin-top:6px;line-height:1.5" data-en="⚠️ Keep this token secret. Only share it with your Master panel." data-fa="⚠️ این توکن رو مخفی نگه دار. فقط با پنل Master به اشتراک بذار.">
+            ⚠️ این توکن رو مخفی نگه دار. فقط با پنل Master به اشتراک بذار.
+          </div>
+        </div>
+
+        <!-- Save Button -->
+        <button class="btn btn-gold" onclick="savePanelRole()" style="width:100%;justify-content:center;margin-top:8px" id="prole-save-btn">
+          💾 <span data-en="Save Panel Settings" data-fa="ذخیره تنظیمات پنل">ذخیره تنظیمات پنل</span>
+        </button>
+      </div>
+   
       <!-- Permanent Database -->
       <div class="card" style="border:1px solid rgba(129,140,248,0.25)">
         <div class="card-hd">
@@ -4714,6 +4774,7 @@ function showDashboard(){
   loadLinks();
   loadAddrs();
   loadSettings();
+  loadPanelRole();
   loadNotifs();
   updateNotifBadge();
   connectLogsWS();
@@ -5104,6 +5165,153 @@ async function saveAllSettings(){
     if(r.ok)toast('All settings saved');
     else toast('Failed to save settings',true);
   }catch(e){toast('Error saving settings',true)}
+}
+
+// ── Panel Role & Node Settings ─────────────────────────────────────────
+let panelCountries = [];
+
+async function loadPanelRole(){
+  try{
+    const r = await fetch('/api/panel/role');
+    if(!r.ok) return;
+    const d = await r.json();
+    
+    if(d.panel_role === 'slave'){
+      $m('prole-slave').checked = true;
+    }else{
+      $m('prole-master').checked = true;
+    }
+    
+    $m('prole-name').value = d.panel_name || '';
+    
+    await loadCountriesList();
+    $m('prole-country').value = d.panel_country || 'nl';
+    
+    $m('prole-token').value = d.my_api_token || '';
+    
+    toggleTokenSection(d.panel_role);
+    
+    $m('prole-status').textContent = d.panel_role === 'master' ? '🔑 Master' : '🖥️ Node';
+    $m('prole-status').style.color = d.panel_role === 'master' ? 'var(--gold)' : 'var(--green)';
+    
+  }catch(e){
+    console.error('Error loading panel role:', e);
+  }
+}
+
+async function loadCountriesList(){
+  if(panelCountries.length > 0) return;
+  try{
+    const r = await fetch('/api/countries');
+    if(!r.ok) return;
+    const d = await r.json();
+    panelCountries = d.countries || [];
+    
+    const sel = $m('prole-country');
+    sel.innerHTML = panelCountries.map(c => 
+      `<option value="${c.code}">${c.flag} ${c.name}</option>`
+    ).join('');
+  }catch(e){
+    console.error('Error loading countries:', e);
+  }
+}
+
+function toggleTokenSection(role){
+  const tokenSection = $m('prole-token-section');
+  if(!tokenSection) return;
+  if(role === 'slave'){
+    tokenSection.style.display = '';
+  }else{
+    tokenSection.style.display = 'none';
+  }
+}
+
+document.addEventListener('change', function(e){
+  if(e.target.name === 'panel_role'){
+    toggleTokenSection(e.target.value);
+  }
+});
+
+async function savePanelRole(){
+  const role = document.querySelector('input[name="panel_role"]:checked')?.value || 'master';
+  const name = $m('prole-name').value.trim();
+  const country = $m('prole-country').value;
+  
+  if(!name){
+    toast('نام پنل الزامی است', true);
+    return;
+  }
+  if(!country){
+    toast('کشور را انتخاب کنید', true);
+    return;
+  }
+  
+  $m('prole-save-btn').disabled = true;
+  
+  try{
+    const r = await fetch('/api/panel/role', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        panel_role: role,
+        panel_name: name,
+        panel_country: country,
+      })
+    });
+    
+    if(!r.ok){
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || 'Error');
+    }
+    
+    const d = await r.json();
+    toast(`✅ ذخیره شد: ${d.panel_flag} ${d.panel_name} (${role})`);
+    
+    $m('prole-status').textContent = role === 'master' ? '🔑 Master' : '🖥️ Node';
+    $m('prole-status').style.color = role === 'master' ? 'var(--gold)' : 'var(--green)';
+    
+  }catch(e){
+    toast(e.message || 'خطا در ذخیره', true);
+  }finally{
+    $m('prole-save-btn').disabled = false;
+  }
+}
+
+function copyPanelToken(){
+  const tok = $m('prole-token').value;
+  if(!tok){
+    toast('توکن موجود نیست', true);
+    return;
+  }
+  navigator.clipboard.writeText(tok).then(() => {
+    toast('✅ توکن کپی شد!');
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = tok;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('✅ توکن کپی شد!');
+  });
+}
+
+async function regeneratePanelToken(){
+  if(!confirm('⚠️ توکن فعلی بی‌اعتبار می‌شه!\n\nاگه این پنل نود هست و مستر بهش وصله، باید توکن جدید رو توی مستر وارد کنی.\n\nادامه؟')) return;
+  
+  try{
+    const r = await fetch('/api/panel/regenerate-token', {method: 'POST'});
+    if(!r.ok) throw new Error('Error');
+    const d = await r.json();
+    
+    $m('prole-token').value = d.my_api_token;
+    toast('✅ توکن جدید تولید شد!');
+    
+  }catch(e){
+    toast('خطا در تولید توکن', true);
+  }
 }
 
 // ── Railway / Permanent Database ──────────────────────────────────────────
@@ -5748,7 +5956,94 @@ async def api_node_stats(request: Request):
         "cpu_percent": psutil.cpu_percent(interval=0.1),
         "memory_percent": psutil.virtual_memory().percent,
     }
+    
+# ═══════════════════════════════════════════════════════════════════════
+# 🌐 PANEL ROLE API — مدیریت نقش پنل (Master/Slave)
+# ═══════════════════════════════════════════════════════════════════════
 
+@app.get("/api/panel/role")
+async def api_get_panel_role(_=Depends(require_auth)):
+    """اطلاعات نقش این پنل رو برمی‌گردونه."""
+    return {
+        "panel_role": CONFIG.get("panel_role", "master"),
+        "panel_name": CONFIG.get("panel_name", "Master-Panel"),
+        "panel_country": CONFIG.get("panel_country", "nl"),
+        "panel_flag": CONFIG.get("panel_flag", "🇳🇱"),
+        "my_api_token": CONFIG.get("my_api_token", ""),
+    }
+
+
+@app.post("/api/panel/role")
+async def api_set_panel_role(request: Request, _=Depends(require_auth)):
+    """نقش پنل رو عوض می‌کنه (master/slave) + نام و کشور رو آپدیت می‌کنه."""
+    body = await request.json()
+    
+    role = str(body.get("panel_role") or "").strip().lower()
+    if role not in ("master", "slave"):
+        raise HTTPException(status_code=400, detail="Role must be 'master' or 'slave'")
+    
+    name = str(body.get("panel_name") or "").strip()[:50]
+    country = str(body.get("panel_country") or "").strip().lower()
+    
+    if not name:
+        raise HTTPException(status_code=400, detail="Panel name is required")
+    if country not in COUNTRIES:
+        raise HTTPException(status_code=400, detail=f"Invalid country code: {country}")
+    
+    flag = COUNTRIES[country]["flag"]
+    
+    # آپدیت CONFIG
+    CONFIG["panel_role"] = role
+    CONFIG["panel_name"] = name
+    CONFIG["panel_country"] = country
+    CONFIG["panel_flag"] = flag
+    
+    # ذخیره توی دیتابیس
+    await save_db()
+    
+    logger.info(f"[PANEL] Role updated: {role}, name: {name}, country: {country}")
+    
+    return {
+        "ok": True,
+        "panel_role": role,
+        "panel_name": name,
+        "panel_country": country,
+        "panel_flag": flag,
+    }
+
+
+@app.post("/api/panel/regenerate-token")
+async def api_regenerate_token(_=Depends(require_auth)):
+    """توکن API این پنل رو دوباره تولید می‌کنه.
+    
+    ⚠️ توجه: اگه این پنل slave باشه و مستر بهش وصل باشه،
+    باید توی مستر هم توکن جدید رو وارد کنی.
+    """
+    new_token = generate_node_token()
+    CONFIG["my_api_token"] = new_token
+    await save_db()
+    
+    logger.warning(f"[PANEL] API token regenerated. Old token is now invalid!")
+    
+    return {
+        "ok": True,
+        "my_api_token": new_token,
+        "warning": "Old token is now invalid. Update it in master panel if this is a slave.",
+    }
+
+
+@app.get("/api/countries")
+async def api_list_countries(_=Depends(require_auth)):
+    """لیست همه‌ی کشورهای موجود برای انتخاب."""
+    countries = []
+    for code, data in COUNTRIES.items():
+        countries.append({
+            "code": code,
+            "name": data["name"],
+            "flag": data["flag"],
+        })
+    return {"countries": countries}
+    
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
     
