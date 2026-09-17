@@ -866,12 +866,47 @@ async def shutdown():
     if http_client:
         await http_client.aclose()
 
-def get_domain() -> str:
-    return (
-        os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RAILWAY_PUBLIC_DOMAIN", "localhost"))
-        .replace("https://", "").replace("http://", "")
-    )
+import contextvars
 
+_request_host_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "luffy_request_host", default=""
+)
+
+def _host_without_port(raw_host: str) -> str:
+    h = raw_host.strip()
+    if not h:
+        return ""
+    if h.startswith("["):
+        return h.split("]")[0].lstrip("[")
+    if h.count(":") == 1:
+        return h.split(":", 1)[0]
+    return h
+
+@app.middleware("http")
+async def _detect_public_host(request: Request, call_next):
+    raw_host = (
+        request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+        or request.headers.get("host", "")
+    )
+    host_only = _host_without_port(raw_host)
+    token = _request_host_ctx.set(host_only) if host_only else None
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            _request_host_ctx.reset(token)
+
+def get_domain() -> str:
+    ctx_host = _request_host_ctx.get()
+    if ctx_host:
+        return ctx_host
+    return (
+        os.environ.get("RENDER_EXTERNAL_URL")
+        or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        or os.environ.get("PUBLIC_DOMAIN")
+        or "localhost"
+    ).replace("https://", "").replace("http://", "")
+    
 def generate_vless_link(
     uuid: str,
     remark: str = "エムエムディー",
