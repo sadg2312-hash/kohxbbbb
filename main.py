@@ -973,13 +973,15 @@ async def startup():
     global http_client
     init_db()
     load_db()
-    init_node_settings()    
+    init_node_settings()
+    init_default_slots()
     migrate_legacy_uuids()
     limits = httpx.Limits(max_connections=500, max_keepalive_connections=100)
     timeout = httpx.Timeout(30.0, connect=10.0)
     http_client = httpx.AsyncClient(limits=limits, timeout=timeout, follow_redirects=True)
     asyncio.create_task(keep_alive())
     asyncio.create_task(github_check_loop())
+    asyncio.create_task(node_health_check_loop())
     await restart_telegram_bot()
     asyncio.create_task(telegram_notifier_cron())
     await ensure_default_link()
@@ -3638,6 +3640,23 @@ async def websocket_tunnel(websocket: WebSocket, auth: str, uuid: str):
 # ══════════════════════════════════════════════════════════════════════════════
 from xhttp_transport import router as xhttp_router
 app.include_router(xhttp_router)
+# ═══════════════════════════════════════════════════════════════════════
+# Node System — فایل nodes.py رو import کن
+# ═══════════════════════════════════════════════════════════════════════
+from nodes import (
+    init_default_slots,
+    get_all_nodes,
+    get_node_by_slot,
+    update_node,
+    clear_node,
+    update_node_status,
+    test_node_connection,
+    test_all_nodes,
+    push_user_to_node,
+    push_user_to_all_nodes,
+    node_health_check_loop,
+    DEFAULT_SLOTS,
+)
 
 # ── HTML Panel (Gold/Neon Theme) ─────────────────────────────────────────
 PANEL_HTML = r"""<!DOCTYPE html>
