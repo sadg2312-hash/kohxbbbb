@@ -838,6 +838,7 @@ async def save_db():
                 "railway_token", "notify_connections",
                 "panel_role", "panel_name", "panel_country", "panel_flag",
                 "my_api_token", "master_url", "master_token",
+                "panel_slot",
             )
             for key in settings_keys:
                 conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, CONFIG.get(key, "")))
@@ -982,6 +983,7 @@ async def startup():
     asyncio.create_task(keep_alive())
     asyncio.create_task(github_check_loop())
     asyncio.create_task(node_health_check_loop())
+    asyncio.create_task(report_usage_to_master_loop())
     await restart_telegram_bot()
     asyncio.create_task(telegram_notifier_cron())
     await ensure_default_link()
@@ -2028,6 +2030,23 @@ async def create_link(request: Request, _=Depends(require_auth)):
             "external_config": external_config,
         }
     await save_db()
+    
+    # ⭐ پوش کردن کاربر جدید به همه نودها
+    # اسم خالص رو بدون پرچم بفرست
+    clean_label = re.sub(r'^[\U0001F1E6-\U0001F1FF]{2}\s+', '', label).strip()
+    
+    user_data_for_nodes = {
+        "uuid": uid,
+        "label": clean_label,
+        "limit_bytes": limit_bytes,
+        "used_bytes": 0,
+        "expires_at": expires_at,
+        "max_connections": max_conn,
+        "variants": variants,
+        "port": port,
+    }
+    asyncio.create_task(push_user_to_all_nodes(user_data_for_nodes))
+    
     return {
         "uuid": uid, "label": label, "limit_bytes": limit_bytes, "used_bytes": 0,
         "max_connections": max_conn, "active": True, "created_at": LINKS[uid]["created_at"],
@@ -2100,6 +2119,23 @@ async def toggle_link(uid: str, request: Request, _=Depends(require_auth)):
             except (ValueError, TypeError):
                 pass
     await save_db()
+    
+    # ⭐ sync کردن تغییرات کاربر با نودها
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            user_data = {
+                "uuid": uid,
+                "label": LINKS[uid]["label"],
+                "limit_bytes": LINKS[uid]["limit_bytes"],
+                "used_bytes": LINKS[uid]["used_bytes"],
+                "expires_at": LINKS[uid].get("expires_at"),
+                "max_connections": LINKS[uid].get("max_connections", 0),
+                "variants": LINKS[uid]["variants"],
+                "port": LINKS[uid].get("port", DEFAULT_PORT),
+                "active": LINKS[uid]["active"],
+            }
+            asyncio.create_task(sync_user_to_all_nodes(user_data))
+    
     return {"ok": True}
 
 @app.delete("/api/links/{uid}")
@@ -2108,6 +2144,10 @@ async def delete_link(uid: str, _=Depends(require_auth)):
         LINKS.pop(uid, None)
     await save_db()
     await close_connections_for_link(uid)
+    
+    # ⭐ حذف کاربر از همه نودها
+    asyncio.create_task(delete_user_from_all_nodes(uid))
+    
     return {"ok": True}
 
 @app.get("/api/addresses")
@@ -2257,7 +2297,7 @@ def _fmt_bytes(b: int) -> str:
     if b >= 1_048_576: return f"{b / 1_048_576:.1f}MB"
     return f"{b / 1024:.1f}KB"
 
-def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
+async def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
     used = link["used_bytes"]
     limit = link["limit_bytes"]
     expires_at_str = link.get("expires_at")
@@ -2290,7 +2330,19 @@ def generate_landing_page(link: dict, uid: str, addresses: list[str]) -> str:
     configs = links_for_all_variants(link, uid)
     for addr in addresses:
         configs.extend(links_for_all_variants(link, uid, address=addr))
-    
+        
+    # ⭐ کانفیگ‌های نودها (فقط online ها)
+    for slot in range(1, MAX_NODES + 1):
+        node = get_node_by_slot(slot)
+        if node and node.get("address") and node.get("status") == "online":
+            try:
+                from nodes import get_config_from_node
+                node_config = await get_config_from_node(slot, uid)
+                if node_config:
+                    configs.append(node_config)
+            except Exception as e:
+                logger.warning(f"[LANDING] Failed to get config from node slot {slot}: {e}")
+                
     external = (link.get("external_config") or "").strip()
     if external:
         for line in external.split("\n"):
@@ -3242,7 +3294,7 @@ async def subscription_endpoint(uid: str, request: Request):
     )
 
     if is_browser:
-        return HTMLResponse(content=generate_landing_page(link, uid, addresses))
+        return HTMLResponse(content=await generate_landing_page(link, uid, addresses))
 
     is_clash = ("hiddify" not in ua) and any(x in ua for x in ["clash", "stash", "verge", "clashx", "clashmeta", "cfw"])
 
@@ -3261,8 +3313,20 @@ async def subscription_endpoint(uid: str, request: Request):
         }
         return Response(content=clash_content, headers=headers)
 
+    # ⭐ کانفیگ مستر
     sub_content = generate_subscription_content(link, uid, addresses)
-
+    
+    # ⭐ کانفیگ‌های نودها (فقط online ها)
+    for slot in range(1, MAX_NODES + 1):
+        node = get_node_by_slot(slot)
+        if node and node.get("address") and node.get("status") == "online":
+            try:
+                from nodes import get_config_from_node
+                node_config = await get_config_from_node(slot, uid)
+                if node_config:
+                    sub_content += "\n" + node_config
+            except Exception as e:
+                logger.warning(f"[SUB] Failed to get config from node slot {slot}: {e}")
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
         "profile-update-interval": "6",
@@ -3656,6 +3720,11 @@ from nodes import (
     push_user_to_all_nodes,
     node_health_check_loop,
     DEFAULT_SLOTS,
+    delete_user_from_all_nodes,
+    sync_user_to_all_nodes,
+    reset_usage_on_all_nodes,
+    get_config_from_node, 
+    report_usage_to_master_loop,
 )
 
 # ── HTML Panel (Gold/Neon Theme) ─────────────────────────────────────────
@@ -4383,6 +4452,35 @@ body[dir="rtl"]{direction:rtl;text-align:right}
 
         <!-- API Token -->
         <div class="fg" id="prole-token-section">
+                <!-- Master Settings (فقط وقتی Node انتخاب شده) -->
+        <div class="fg" id="prole-master-section" style="display:none">
+          <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:8px">
+            <div style="font-weight:700;margin-bottom:10px;color:var(--gold)">🔗 اتصال به پنل Master</div>
+            
+            <div class="fg">
+              <label class="fl">Slot این پنل</label>
+              <select class="fs" id="prole-slot">
+                <option value="1">1 - 🇺🇸 America</option>
+                <option value="2">2 - 🇸🇬 Singapore</option>
+                <option value="3">3 - 🇳🇱 Netherlands</option>
+                <option value="4">4 - 🇫🇮 Finland</option>
+                <option value="5">5 - 🌐 Variable</option>
+              </select>
+              <div style="font-size:10px;color:var(--text3);margin-top:4px">توی پنل Master، توی کدوم اسلات قرار داری؟</div>
+            </div>
+            
+            <div class="fg">
+              <label class="fl">آدرس پنل Master</label>
+              <input class="fi" type="text" id="prole-master-url" placeholder="https://hl-panel.up.railway.app" style="font-family:monospace;font-size:12px">
+            </div>
+            
+            <div class="fg">
+              <label class="fl">توکن Master</label>
+              <input class="fi" type="text" id="prole-master-token" placeholder="nd_xxxxxxxxxxxxxxxxx" style="font-family:monospace;font-size:12px">
+              <div style="font-size:10px;color:var(--text3);margin-top:4px">از پنل Master → تنظیمات → نقش پنل → کپی توکن</div>
+            </div>
+          </div>
+        </div>
           <label class="fl" data-en="API Token (for Master to connect)" data-fa="توکن API (برای اتصال مستر)">توکن API (برای اتصال مستر)</label>
           <div style="display:flex;gap:8px;align-items:stretch">
             <input class="fi" type="text" id="prole-token" readonly style="flex:1;font-family:monospace;font-size:11px;background:var(--surface3)">
@@ -5510,6 +5608,11 @@ async function loadPanelRole(){
     
     $m('prole-token').value = d.my_api_token || '';
     
+    // ⭐ فیلدهای Master
+    if($m('prole-slot')) $m('prole-slot').value = d.panel_slot || 1;
+    if($m('prole-master-url')) $m('prole-master-url').value = d.master_url || '';
+    if($m('prole-master-token')) $m('prole-master-token').value = d.master_token || '';
+    
     toggleTokenSection(d.panel_role);
     
     $m('prole-status').textContent = d.panel_role === 'master' ? '🔑 Master' : '🖥️ Node';
@@ -5539,11 +5642,14 @@ async function loadCountriesList(){
 
 function toggleTokenSection(role){
   const tokenSection = $m('prole-token-section');
+  const masterSection = $m('prole-master-section');
   if(!tokenSection) return;
   if(role === 'slave'){
     tokenSection.style.display = '';
+    if(masterSection) masterSection.style.display = '';
   }else{
     tokenSection.style.display = 'none';
+    if(masterSection) masterSection.style.display = 'none';
   }
 }
 
@@ -5557,6 +5663,9 @@ async function savePanelRole(){
   const role = document.querySelector('input[name="panel_role"]:checked')?.value || 'master';
   const name = $m('prole-name').value.trim();
   const country = $m('prole-country').value;
+  const slot = parseInt($m('prole-slot')?.value || '1');
+  const masterUrl = ($m('prole-master-url')?.value || '').trim();
+  const masterToken = ($m('prole-master-token')?.value || '').trim();
   
   if(!name){
     toast('نام پنل الزامی است', true);
@@ -5577,6 +5686,9 @@ async function savePanelRole(){
         panel_role: role,
         panel_name: name,
         panel_country: country,
+        panel_slot: slot,
+        master_url: masterUrl,
+        master_token: masterToken,
       })
     });
     
@@ -6219,31 +6331,39 @@ async def api_node_receive_user(request: Request):
     
     if not uid or not label:
         raise HTTPException(status_code=400, detail="uuid and label are required")
+        
+        # ⭐ اسم خالص رو بدون پرچم جدا کن + پرچم این نود رو اضافه کن
+    import re as _re
+    clean_label = _re.sub(r'^[\U0001F1E6-\U0001F1FF]{2}\s+', '', label).strip()
+    my_flag = get_panel_flag()
+    final_label = f"{my_flag} {clean_label}"
     
     # اگه کاربر از قبل هست، آپدیت کن
     variants = body.get("variants") or default_variants()
     limit_bytes = int(body.get("limit_bytes") or 0)
     expires_at = body.get("expires_at")
     max_connections = int(body.get("max_connections") or 0)
+    active = bool(body.get("active", True))  
     
     async with LINKS_LOCK:
         if uid in LINKS:
             # آپدیت
-            LINKS[uid]["label"] = label
+            LINKS[uid]["label"] = final_label
             LINKS[uid]["limit_bytes"] = limit_bytes
             LINKS[uid]["expires_at"] = expires_at
             LINKS[uid]["max_connections"] = max_connections
             LINKS[uid]["variants"] = variants
+            LINKS[uid]["active"] = active 
             logger.info(f"[NODE] Updated existing user '{label}' ({uid[:8]})")
         else:
             # ساخت جدید
             LINKS[uid] = {
-                "label": label,
+                "label": final_label, 
                 "limit_bytes": limit_bytes,
                 "used_bytes": 0,
                 "max_connections": max_connections,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "active": True,
+                "active": active,
                 "expires_at": expires_at,
                 "variants": variants,
                 "port": DEFAULT_PORT,
@@ -6291,6 +6411,9 @@ async def api_get_panel_role(_=Depends(require_auth)):
         "panel_country": CONFIG.get("panel_country", "nl"),
         "panel_flag": CONFIG.get("panel_flag", "🇳🇱"),
         "my_api_token": CONFIG.get("my_api_token", ""),
+        "panel_slot": int(CONFIG.get("panel_slot", 1)),
+        "master_url": CONFIG.get("master_url", ""),
+        "master_token": CONFIG.get("master_token", ""),
     }
 
 
@@ -6319,6 +6442,18 @@ async def api_set_panel_role(request: Request, _=Depends(require_auth)):
     CONFIG["panel_country"] = country
     CONFIG["panel_flag"] = flag
     
+    # ⭐ فیلدهای Master
+    if "panel_slot" in body:
+        slot = int(body.get("panel_slot") or 1)
+        if slot < 1 or slot > MAX_NODES:
+            raise HTTPException(status_code=400, detail=f"Slot must be between 1 and {MAX_NODES}")
+        CONFIG["panel_slot"] = slot
+    
+    if "master_url" in body:
+        CONFIG["master_url"] = str(body.get("master_url") or "").strip()
+    if "master_token" in body:
+        CONFIG["master_token"] = str(body.get("master_token") or "").strip()
+    
     # ذخیره توی دیتابیس
     await save_db()
     
@@ -6331,7 +6466,6 @@ async def api_set_panel_role(request: Request, _=Depends(require_auth)):
         "panel_country": country,
         "panel_flag": flag,
     }
-
 
 @app.post("/api/panel/regenerate-token")
 async def api_regenerate_token(_=Depends(require_auth)):
@@ -6365,6 +6499,158 @@ async def api_list_countries(_=Depends(require_auth)):
         })
     return {"countries": countries}
     
+@app.post("/api/node/delete-user")
+async def api_node_delete_user(request: Request):
+    """حذف کاربر از این نود (از طرف مستر)."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uuid is required")
+    
+    async with LINKS_LOCK:
+        LINKS.pop(uid, None)
+    await save_db()
+    await close_connections_for_link(uid)
+    
+    logger.info(f"[NODE] Deleted user {uid[:8]} by master request")
+    return {"status": "ok", "uuid": uid}
+
+@app.post("/api/node/reset-usage")
+async def api_node_reset_usage(request: Request):
+    """ریست مصرف کاربر روی این نود."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uuid is required")
+    
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            LINKS[uid]["used_bytes"] = 0
+    await save_db()
+    
+    logger.info(f"[NODE] Reset usage for {uid[:8]} by master request")
+    return {"status": "ok", "uuid": uid}
+
+
+@app.post("/api/node/disable-user")
+async def api_node_disable_user(request: Request):
+    """غیرفعال کردن کاربر روی این نود."""
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    uid = body.get("uuid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uuid is required")
+    
+    async with LINKS_LOCK:
+        if uid in LINKS:
+            LINKS[uid]["active"] = False
+    await save_db()
+    await close_connections_for_link(uid)
+    
+    logger.info(f"[NODE] Disabled user {uid[:8]} by master request")
+    return {"status": "ok", "uuid": uid}
+ 
+
+@app.get("/api/node/get-config")
+async def api_node_get_config(request: Request, uuid: str):
+    """کانفیگ کاربر رو با پرچم و نام این پنل می‌سازه.
+    
+    این endpoint روی همه‌ی پنل‌ها (مستر و نود) فعاله.
+    مستر با فرستادن uuid، از نود می‌پرسه کانفیگ کاربر چیه.
+    """
+    # چک توکن
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # کاربر رو پیدا کن
+    async with LINKS_LOCK:
+        link = LINKS.get(uuid)
+        if link is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        link = dict(link)
+    
+    # چک فعال/منقضی
+    if not link.get("active", True):
+        raise HTTPException(status_code=403, detail="User inactive")
+    
+    expires_at = parse_expires_at(link.get("expires_at"))
+    if expires_at is not None and expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=403, detail="User expired")
+    
+    # کانفیگ‌ها رو بساز (با پرچم و نام این پنل)
+    configs = links_for_all_variants(link, uuid)
+    
+    if not configs:
+        raise HTTPException(status_code=404, detail="No configs found")
+    
+    # اولین کانفیگ رو برگردون
+    return {"status": "ok", "config": configs[0]}   
+
+
+@app.post("/api/node/report-usage")
+async def api_node_report_usage(request: Request):
+    """دریافت گزارش مصرف از نودها.
+    
+    هر نود هر ۳۰ ثانیه مصرف کاربراش رو به مستر گزارش می‌ده.
+    """
+    # چک توکن
+    token = request.headers.get("X-Node-Token", "")
+    my_token = CONFIG.get("my_api_token", "")
+    if not my_token or token != my_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    body = await request.json()
+    reports = body.get("reports") or []  # لیست [{uuid, used_bytes}, ...]
+    
+    if not reports:
+        return {"status": "ok", "updated": 0}
+    
+    # ذخیره توی node_usage
+    # این نود، slot شماره‌ی خودش رو باید بفرسته
+    node_slot = int(body.get("node_slot") or 0)
+    if node_slot < 1 or node_slot > MAX_NODES:
+        raise HTTPException(status_code=400, detail="Invalid node_slot")
+    
+    conn = get_db()
+    try:
+        updated = 0
+        now = time.time()
+        for rep in reports:
+            uid = rep.get("uuid")
+            used = int(rep.get("used_bytes") or 0)
+            if not uid:
+                continue
+            # INSERT OR REPLACE (اگه بود آپدیت، اگه نبود بساز)
+            conn.execute("""
+                INSERT INTO node_usage (uuid, node_slot, used_bytes, last_report)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(uuid, node_slot) DO UPDATE SET
+                    used_bytes = excluded.used_bytes,
+                    last_report = excluded.last_report
+            """, (uid, node_slot, used, now))
+            updated += 1
+        conn.commit()
+        logger.info(f"[NODE] Received usage report from slot {node_slot}: {updated} users")
+        return {"status": "ok", "updated": updated}
+    finally:
+        conn.close()    
+        
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=CONFIG["port"])
     
